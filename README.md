@@ -1,36 +1,69 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# KaloriTakip
 
-## Getting Started
+Calorie & macro tracker — Türkçe / English. Next.js + Supabase, mobile-first web app.
 
-First, run the development server:
+## Features (v0.1)
+
+- Email/password auth (Supabase)
+- Onboarding → daily calorie + macro target (Mifflin-St Jeor, goal & pace)
+- Food diary by meal (breakfast / lunch / dinner / snacks), per-gram or per-serving
+- Food search: shared Turkish food database + your custom foods + Open Food Facts (packaged products)
+- Daily summary ring, macro bars, water counter, quick weight log
+- Progress: weight chart (30 / 90 days / all), last-7-days calories, logging streak
+- Profile: edit targets, water goal, language toggle, log out, delete account
+- Installable as a PWA (manifest included)
+
+## Setup
+
+### 1. Supabase
+
+1. Create a new project.
+2. **SQL Editor → New query** → paste `supabase/schema.sql` → **Run**.
+3. New query → paste `supabase/seed_foods.sql` → **Run** (shared Turkish food list).
+4. **Authentication → Providers → Email**: for testing with friends you can turn off *Confirm email*.
+5. **Project Settings → API**: copy *Project URL* and *anon public* key.
+
+### 2. Local
 
 ```bash
+cp .env.example .env.local   # paste URL + anon key
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:3000.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### 3. Vercel
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Import the GitHub repo, add the two env vars (`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`), deploy.
+Then in Supabase **Authentication → URL Configuration** set *Site URL* to your Vercel URL and add it to *Redirect URLs*.
 
-## Learn More
+## Structure
 
-To learn more about Next.js, take a look at the following resources:
+```
+src/
+  app/
+    (auth)/login, signup, forgot-password
+    (app)/           # tab-bar pages: home, diary, diary/add, progress, profile
+    onboarding/
+    api/foods/search # local DB + Open Food Facts
+    api/foods/barcode
+  components/        # TabBar, CalorieRing, MacroRow, ProfileProvider, …
+  lib/
+    nutrition.ts     # BMR/TDEE/macros, helpers
+    data.ts          # Supabase queries
+    off.ts           # Open Food Facts client
+    i18n/            # en.ts, tr.ts, context
+    supabase/        # client + server helpers
+  proxy.ts           # auth redirect (Next.js "proxy", formerly middleware)
+supabase/
+  schema.sql, seed_foods.sql
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Roadmap
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Photo logging (Gemini) and barcode scanning (camera)
+- Reminders / notifications
+- Google sign-in
+- Recipes (multi-ingredient custom foods)
+- Exercise & step sync
