@@ -3,8 +3,20 @@
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useT, foodName } from "@/lib/i18n/context";
+import type { Dict } from "@/lib/i18n/en";
 import { useProfile } from "@/components/ProfileProvider";
-import { addEntry, createCustomFood, fetchRecentFoods } from "@/lib/data";
+import {
+  AiError,
+  addEntry,
+  aiLookupFood,
+  aiParseMeal,
+  createCustomFood,
+  fetchAiRemaining,
+  fetchRecentFoods,
+  searchFoods,
+  searchPackaged,
+} from "@/lib/data";
+import { AI_DAILY_LIMIT } from "@/lib/constants";
 import { scale, todayISO } from "@/lib/nutrition";
 import { MEALS, type FoodHit, type Meal } from "@/lib/types";
 
@@ -16,6 +28,20 @@ export default function AddFoodPage() {
   );
 }
 
+function aiMessage(t: Dict, e: unknown) {
+  if (e instanceof AiError) {
+    switch (e.code) {
+      case "limit":
+        return t.ai_limit_reached.replace("{n}", String(AI_DAILY_LIMIT));
+      case "not_configured":
+        return t.ai_not_configured;
+      case "not_food":
+        return t.ai_not_food;
+    }
+  }
+  return t.ai_failed;
+}
+
 function AddFood() {
   const { t, lang } = useT();
   const { profile } = useProfile();
@@ -25,63 +51,26 @@ function AddFood() {
   const initialMeal = (params.get("meal") as Meal) || "snack";
 
   const [meal, setMeal] = useState<Meal>(MEALS.includes(initialMeal) ? initialMeal : "snack");
-  const [q, setQ] = useState("");
-  const [local, setLocal] = useState<FoodHit[]>([]);
-  const [off, setOff] = useState<FoodHit[]>([]);
-  const [recent, setRecent] = useState<FoodHit[]>([]);
-  const [searching, setSearching] = useState(false);
+  const [tab, setTab] = useState<"search" | "ai">("search");
+  const [remaining, setRemaining] = useState<number | null>(null);
   const [selected, setSelected] = useState<FoodHit | null>(null);
   const [showCustom, setShowCustom] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchRecentFoods(profile.id).then(setRecent);
+    fetchAiRemaining(profile.id).then(setRemaining).catch(() => {});
   }, [profile.id]);
 
-  function onQueryChange(value: string) {
-    setQ(value);
-    if (value.trim().length < 2) {
-      setLocal([]);
-      setOff([]);
-      setSearching(false);
-    }
+  function flash(msg: string) {
+    setToast(msg);
+    setTimeout(() => setToast(null), 1500);
   }
-
-  // Debounced search.
-  useEffect(() => {
-    const term = q.trim();
-    if (term.length < 2) return;
-    const ctrl = new AbortController();
-    const h = setTimeout(async () => {
-      setSearching(true);
-      try {
-        const res = await fetch(
-          `/api/foods/search?q=${encodeURIComponent(term)}&lang=${lang}`,
-          { signal: ctrl.signal }
-        );
-        const json = await res.json();
-        setLocal(json.local ?? []);
-        setOff(json.off ?? []);
-      } catch {
-        /* aborted or network */
-      } finally {
-        setSearching(false);
-      }
-    }, 350);
-    return () => {
-      clearTimeout(h);
-      ctrl.abort();
-    };
-  }, [q, lang]);
 
   async function confirm(hit: FoodHit, grams: number) {
     await addEntry(profile.id, date, meal, hit, grams, foodName(hit, lang));
     setSelected(null);
-    setToast(t.added);
-    setTimeout(() => setToast(null), 1500);
+    flash(t.added);
   }
-
-  const showingSearch = q.trim().length >= 2;
 
   return (
     <main className="px-5 pt-6 space-y-4">
@@ -104,39 +93,36 @@ function AddFood() {
         ))}
       </div>
 
-      <input
-        className="input text-base"
-        placeholder={t.search_food}
-        value={q}
-        onChange={(e) => onQueryChange(e.target.value)}
-        autoFocus
-      />
+      <div className="grid grid-cols-2 gap-1 rounded-xl bg-surface-2 p-1 border border-border">
+        {(["search", "ai"] as const).map((k) => (
+          <button
+            key={k}
+            onClick={() => setTab(k)}
+            className={`rounded-lg py-2 text-sm font-medium ${
+              tab === k ? "bg-surface text-text" : "text-muted"
+            }`}
+          >
+            {k === "search" ? `🔍 ${t.tab_search}` : `✨ ${t.tab_ai}`}
+          </button>
+        ))}
+      </div>
 
-      {!showingSearch && (
-        <>
-          <p className="text-xs text-muted">{t.search_hint}</p>
-          {recent.length > 0 && (
-            <FoodList title="⏱" items={recent} onPick={setSelected} />
-          )}
-        </>
+      {tab === "search" ? (
+        <SearchTab
+          onPick={setSelected}
+          onCustom={() => setShowCustom(true)}
+          remaining={remaining}
+          setRemaining={setRemaining}
+        />
+      ) : (
+        <AiTab
+          date={date}
+          meal={meal}
+          remaining={remaining}
+          setRemaining={setRemaining}
+          onAdded={() => flash(t.added)}
+        />
       )}
-
-      {showingSearch && (
-        <div className="space-y-3">
-          {searching && <p className="text-xs text-muted">{t.searching}</p>}
-          {local.length > 0 && <FoodList items={local} onPick={setSelected} />}
-          {off.length > 0 && (
-            <FoodList title={t.source_off} items={off} onPick={setSelected} />
-          )}
-          {!searching && local.length === 0 && off.length === 0 && (
-            <p className="text-sm text-muted">{t.no_results}</p>
-          )}
-        </div>
-      )}
-
-      <button className="btn btn-ghost w-full text-accent" onClick={() => setShowCustom(true)}>
-        + {t.add_custom}
-      </button>
 
       {selected && (
         <PortionSheet
@@ -158,7 +144,7 @@ function AddFood() {
       )}
 
       {toast && (
-        <div className="fixed bottom-24 inset-x-0 flex justify-center pointer-events-none">
+        <div className="fixed bottom-24 inset-x-0 flex justify-center pointer-events-none z-50">
           <span className="bg-accent text-[#06241a] rounded-full px-4 py-2 text-sm font-medium">
             {toast}
           </span>
@@ -167,6 +153,362 @@ function AddFood() {
     </main>
   );
 }
+
+/* ------------------------------------------------------------------ */
+/* Search tab                                                          */
+/* ------------------------------------------------------------------ */
+
+function SearchTab({
+  onPick,
+  onCustom,
+  remaining,
+  setRemaining,
+}: {
+  onPick: (f: FoodHit) => void;
+  onCustom: () => void;
+  remaining: number | null;
+  setRemaining: (n: number) => void;
+}) {
+  const { t, lang } = useT();
+  const { profile } = useProfile();
+
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState<FoodHit[]>([]);
+  const [resultsFor, setResultsFor] = useState("");
+  const [recent, setRecent] = useState<FoodHit[]>([]);
+
+  const [packaged, setPackaged] = useState<FoodHit[] | null>(null);
+  const [packagedBusy, setPackagedBusy] = useState(false);
+  const [packagedError, setPackagedError] = useState(false);
+
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiMsg, setAiMsg] = useState<string | null>(null);
+
+  const term = q.trim();
+  const active = term.length >= 2;
+  const searching = active && resultsFor !== term;
+
+  useEffect(() => {
+    fetchRecentFoods(profile.id).then(setRecent).catch(() => {});
+  }, [profile.id]);
+
+  // Debounced search in our own list (browser → Supabase, ranked in the database).
+  useEffect(() => {
+    if (term.length < 2) return;
+    let cancelled = false;
+    const h = setTimeout(() => {
+      searchFoods(term)
+        .then((r) => {
+          if (cancelled) return;
+          setResults(r);
+          setResultsFor(term);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setResults([]);
+          setResultsFor(term);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(h);
+    };
+  }, [term]);
+
+  function onQueryChange(v: string) {
+    setQ(v);
+    setPackaged(null);
+    setPackagedError(false);
+    setAiMsg(null);
+  }
+
+  async function loadPackaged() {
+    setPackagedBusy(true);
+    setPackagedError(false);
+    try {
+      setPackaged(await searchPackaged(term, lang));
+    } catch {
+      setPackagedError(true);
+    } finally {
+      setPackagedBusy(false);
+    }
+  }
+
+  async function askAi() {
+    setAiBusy(true);
+    setAiMsg(null);
+    try {
+      const r = await aiLookupFood(term);
+      if (typeof r.remaining === "number") setRemaining(r.remaining);
+      onPick(r.food);
+    } catch (e) {
+      if (e instanceof AiError && typeof e.remaining === "number") setRemaining(e.remaining);
+      setAiMsg(aiMessage(t, e));
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  const noResults = active && !searching && results.length === 0;
+  const outOfAi = remaining === 0;
+
+  return (
+    <div className="space-y-3">
+      <input
+        className="input text-base"
+        placeholder={t.search_food}
+        value={q}
+        onChange={(e) => onQueryChange(e.target.value)}
+        autoFocus
+      />
+
+      {!active && (
+        <>
+          <p className="text-xs text-muted">{t.search_hint}</p>
+          {recent.length > 0 && <FoodList title={t.recent} items={recent} onPick={onPick} />}
+        </>
+      )}
+
+      {active && (
+        <>
+          {searching && results.length === 0 && (
+            <p className="text-xs text-muted">{t.searching}</p>
+          )}
+          {results.length > 0 && (
+            <div className={searching ? "opacity-60 transition-opacity" : ""}>
+              <FoodList items={results} onPick={onPick} />
+            </div>
+          )}
+          {noResults && <p className="text-sm text-muted">{t.no_results}</p>}
+
+          {!searching && (
+            <div className="space-y-2">
+              <button
+                className={`btn w-full ${noResults ? "btn-primary" : "btn-ghost text-accent"}`}
+                onClick={askAi}
+                disabled={aiBusy || outOfAi}
+              >
+                {aiBusy ? t.ai_thinking : `✨ ${t.ask_ai_about.replace("{q}", term)}`}
+              </button>
+              {aiMsg && <p className="text-sm text-danger">{aiMsg}</p>}
+
+              {packaged === null ? (
+                <button
+                  className="btn btn-ghost w-full text-sm"
+                  onClick={loadPackaged}
+                  disabled={packagedBusy}
+                >
+                  {packagedBusy ? t.searching : `📦 ${t.search_packaged}`}
+                </button>
+              ) : packaged.length > 0 ? (
+                <FoodList title={t.packaged_title} items={packaged} onPick={onPick} />
+              ) : (
+                <p className="text-sm text-muted">{t.packaged_none}</p>
+              )}
+              {packagedError && <p className="text-sm text-danger">{t.packaged_error}</p>}
+            </div>
+          )}
+        </>
+      )}
+
+      <AiRemaining remaining={remaining} />
+
+      <button className="btn btn-ghost w-full text-sm" onClick={onCustom}>
+        + {t.add_custom}
+      </button>
+    </div>
+  );
+}
+
+function AiRemaining({ remaining }: { remaining: number | null }) {
+  const { t } = useT();
+  if (remaining === null) return null;
+  return (
+    <p className={`text-xs text-center ${remaining === 0 ? "text-danger" : "text-muted"}`}>
+      {remaining === 0
+        ? t.ai_limit_reached.replace("{n}", String(AI_DAILY_LIMIT))
+        : t.ai_remaining.replace("{n}", String(remaining))}
+    </p>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* AI tab: type a whole meal                                           */
+/* ------------------------------------------------------------------ */
+
+interface Draft {
+  key: string;
+  food: FoodHit;
+  grams: string;
+}
+
+function AiTab({
+  date,
+  meal,
+  remaining,
+  setRemaining,
+  onAdded,
+}: {
+  date: string;
+  meal: Meal;
+  remaining: number | null;
+  setRemaining: (n: number) => void;
+  onAdded: () => void;
+}) {
+  const { t, lang } = useT();
+  const { profile } = useProfile();
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<Draft[]>([]);
+
+  async function calculate() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await aiParseMeal(text.trim());
+      setRemaining(r.remaining);
+      if (r.items.length === 0) {
+        setMsg(t.ai_no_items);
+        setDrafts([]);
+      } else {
+        setDrafts(
+          r.items.map((it, i) => ({
+            key: `${it.food.id ?? i}-${i}`,
+            food: it.food,
+            grams: String(it.grams),
+          }))
+        );
+      }
+    } catch (e) {
+      if (e instanceof AiError && typeof e.remaining === "number") setRemaining(e.remaining);
+      setMsg(aiMessage(t, e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function addAll() {
+    setSaving(true);
+    try {
+      for (const d of drafts) {
+        const g = Number(d.grams.replace(",", "."));
+        if (!(g > 0)) continue;
+        await addEntry(profile.id, date, meal, d.food, g, foodName(d.food, lang));
+      }
+      setDrafts([]);
+      setText("");
+      onAdded();
+    } catch {
+      setMsg(t.error_generic);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const totals = drafts.reduce(
+    (s, d) => {
+      const g = Number(d.grams.replace(",", ".")) || 0;
+      s.kcal += scale(d.food.kcal_100, g);
+      s.protein += scale(d.food.protein_100, g);
+      s.carbs += scale(d.food.carbs_100, g);
+      s.fat += scale(d.food.fat_100, g);
+      return s;
+    },
+    { kcal: 0, protein: 0, carbs: 0, fat: 0 }
+  );
+  const validCount = drafts.filter((d) => Number(d.grams.replace(",", ".")) > 0).length;
+
+  return (
+    <div className="space-y-3">
+      <textarea
+        className="input text-base min-h-24 resize-none"
+        placeholder={t.ai_placeholder}
+        value={text}
+        maxLength={400}
+        onChange={(e) => setText(e.target.value)}
+        autoFocus
+      />
+      <button
+        className="btn btn-primary w-full"
+        onClick={calculate}
+        disabled={busy || text.trim().length < 2 || remaining === 0}
+      >
+        {busy ? t.ai_thinking : `✨ ${t.ai_calculate}`}
+      </button>
+      {msg && <p className="text-sm text-danger">{msg}</p>}
+      <AiRemaining remaining={remaining} />
+
+      {drafts.length > 0 && (
+        <section className="card p-4 space-y-3">
+          <p className="text-xs text-muted">{t.ai_estimate_note}</p>
+          <ul className="divide-y divide-border">
+            {drafts.map((d) => {
+              const g = Number(d.grams.replace(",", ".")) || 0;
+              return (
+                <li key={d.key} className="py-2 flex items-center gap-2">
+                  <div className="flex-1 min-w-0">
+                    <p className="truncate">{foodName(d.food, lang)}</p>
+                    <p className="text-xs text-muted">
+                      {Math.round(scale(d.food.kcal_100, g))} kcal · P{" "}
+                      {Math.round(scale(d.food.protein_100, g))} · C{" "}
+                      {Math.round(scale(d.food.carbs_100, g))} · F{" "}
+                      {Math.round(scale(d.food.fat_100, g))}
+                    </p>
+                  </div>
+                  <input
+                    className="input w-20 text-center px-2"
+                    type="number"
+                    inputMode="decimal"
+                    value={d.grams}
+                    onChange={(e) =>
+                      setDrafts((prev) =>
+                        prev.map((p) => (p.key === d.key ? { ...p, grams: e.target.value } : p))
+                      )
+                    }
+                  />
+                  <span className="text-xs text-muted">g</span>
+                  <button
+                    className="text-muted px-2 text-lg"
+                    aria-label={t.remove}
+                    onClick={() => setDrafts((prev) => prev.filter((p) => p.key !== d.key))}
+                  >
+                    ×
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          <div className="flex items-baseline justify-between text-sm">
+            <span className="text-muted">{t.total}</span>
+            <span>
+              <span className="font-semibold">{Math.round(totals.kcal)} kcal</span>
+              <span className="text-muted">
+                {" "}
+                · P {Math.round(totals.protein)} · C {Math.round(totals.carbs)} · F{" "}
+                {Math.round(totals.fat)}
+              </span>
+            </span>
+          </div>
+          <button
+            className="btn btn-primary w-full"
+            onClick={addAll}
+            disabled={saving || validCount === 0}
+          >
+            {saving
+              ? t.loading
+              : t.ai_add_all.replace("{meal}", t[meal]).replace("{n}", String(validCount))}
+          </button>
+        </section>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Shared pieces                                                       */
+/* ------------------------------------------------------------------ */
 
 function FoodList({
   title,
@@ -182,24 +524,37 @@ function FoodList({
     <section className="card">
       {title && <p className="px-4 pt-3 text-xs text-muted">{title}</p>}
       <ul className="divide-y divide-border">
-        {items.map((f, i) => (
-          <li key={f.id ?? `${f.barcode}-${i}`}>
-            <button
-              className="w-full text-left px-4 py-3 flex items-center justify-between gap-3"
-              onClick={() => onPick(f)}
-            >
-              <div className="min-w-0">
-                <p className="truncate">{foodName(f, lang)}</p>
-                <p className="text-xs text-muted truncate">
-                  {f.brand ? `${f.brand} · ` : ""}
-                  {f.kcal_100} kcal {t.per_100g}
-                  {f.source === "custom" ? ` · ${t.source_custom}` : ""}
-                </p>
-              </div>
-              <span className="text-accent text-xl">+</span>
-            </button>
-          </li>
-        ))}
+        {items.map((f, i) => {
+          const serving =
+            f.serving_g && (lang === "tr" ? f.serving_label_tr : f.serving_label_en);
+          return (
+            <li key={f.id ?? `${f.barcode}-${i}`}>
+              <button
+                className="w-full text-left px-4 py-3 flex items-center justify-between gap-3"
+                onClick={() => onPick(f)}
+              >
+                <div className="min-w-0">
+                  <p className="truncate">
+                    {foodName(f, lang)}
+                    {f.source === "ai" && (
+                      <span className="ml-2 text-[10px] align-middle rounded-full border border-border px-1.5 py-0.5 text-muted">
+                        {t.source_ai}
+                      </span>
+                    )}
+                  </p>
+                  <p className="text-xs text-muted truncate">
+                    {f.brand ? `${f.brand} · ` : ""}
+                    {serving
+                      ? `${serving} ≈ ${Math.round(scale(f.kcal_100, f.serving_g!))} kcal`
+                      : `${f.kcal_100} kcal ${t.per_100g}`}
+                    {f.source === "custom" ? ` · ${t.source_custom}` : ""}
+                  </p>
+                </div>
+                <span className="text-accent text-xl">+</span>
+              </button>
+            </li>
+          );
+        })}
       </ul>
     </section>
   );
@@ -232,6 +587,7 @@ function PortionSheet({
     <Sheet onClose={onCancel}>
       <h2 className="font-semibold text-lg">{foodName(hit, lang)}</h2>
       {hit.brand && <p className="text-sm text-muted">{hit.brand}</p>}
+      {hit.source === "ai" && <p className="text-xs text-muted mt-1">✨ {t.ai_estimate_note}</p>}
 
       {hasServing && (
         <div className="flex gap-1 mt-3">

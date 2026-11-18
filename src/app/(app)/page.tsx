@@ -47,7 +47,7 @@ export default function HomePage() {
         </h1>
       </header>
 
-      <section className="card p-4">
+      <section className={`card p-4 transition-opacity ${day.loading ? "opacity-50" : ""}`}>
         <CalorieRing eaten={day.totals.kcal} target={profile.calorie_target} />
         <div className="mt-4">
           <MacroRow

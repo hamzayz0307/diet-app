@@ -27,10 +27,10 @@ export async function proxy(request: NextRequest) {
     }
   );
 
-  // Refreshes the session cookie if needed.
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  // Verifies the login token locally (no trip to Supabase's auth server when the
+  // project uses asymmetric signing keys) and refreshes the session cookie if needed.
+  const { data } = await supabase.auth.getClaims();
+  const user = data?.claims?.sub ?? null;
 
   const { pathname } = request.nextUrl;
   const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p));

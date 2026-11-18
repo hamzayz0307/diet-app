@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { currentUserId } from "@/lib/profile";
 import { lookupBarcode } from "@/lib/off";
 
 export async function GET(req: NextRequest) {
@@ -8,11 +9,10 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "bad_code" }, { status: 400 });
   }
 
+  if (!(await currentUserId())) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const { data: local } = await supabase
     .from("foods")

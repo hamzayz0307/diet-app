@@ -59,7 +59,7 @@ function Diary() {
         </button>
       </header>
 
-      <section className="card p-4">
+      <section className={`card p-4 transition-opacity ${day.loading ? "opacity-50" : ""}`}>
         <div className="flex items-baseline justify-between">
           <span className="text-muted text-sm">{t.eaten}</span>
           <span>

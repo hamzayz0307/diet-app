@@ -44,7 +44,7 @@ export interface Food {
   serving_g: number | null;
   serving_label_en: string | null;
   serving_label_tr: string | null;
-  source: "seed" | "custom" | "off";
+  source: "seed" | "custom" | "off" | "ai";
 }
 
 /** A search hit — may come from our DB or from Open Food Facts (not yet saved). */
@@ -61,7 +61,7 @@ export interface FoodHit {
   serving_g: number | null;
   serving_label_en: string | null;
   serving_label_tr: string | null;
-  source: "seed" | "custom" | "off";
+  source: "seed" | "custom" | "off" | "ai";
 }
 
 export interface DiaryEntry {

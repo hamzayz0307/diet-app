@@ -1,6 +1,73 @@
 import { createClient } from "@/lib/supabase/client";
 import { scale } from "@/lib/nutrition";
+import { AI_DAILY_LIMIT, istanbulToday } from "@/lib/constants";
 import type { DiaryEntry, FoodHit, Meal, WeightLog } from "@/lib/types";
+import type { AiErrorCode } from "@/lib/ai/codes";
+
+/** Ranked search in our food list — straight from the browser to Supabase. */
+export async function searchFoods(q: string): Promise<FoodHit[]> {
+  const supabase = createClient();
+  const { data, error } = await supabase.rpc("search_foods", { q, max_results: 30 });
+  if (error) throw error;
+  return (data ?? []) as FoodHit[];
+}
+
+/** Packaged products sold in Turkey (Open Food Facts) — only on request. */
+export async function searchPackaged(q: string, lang: "en" | "tr"): Promise<FoodHit[]> {
+  const res = await fetch(`/api/foods/packaged?q=${encodeURIComponent(q)}&lang=${lang}`);
+  if (!res.ok) throw new Error("packaged_failed");
+  const json = (await res.json()) as { items?: FoodHit[] };
+  return json.items ?? [];
+}
+
+export type { AiErrorCode };
+
+export class AiError extends Error {
+  constructor(public code: AiErrorCode, public remaining?: number) {
+    super(code);
+  }
+}
+
+async function postAi<T>(path: string, body: object): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new AiError("failed");
+  }
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new AiError((json.error as AiErrorCode) ?? "failed", json.remaining);
+  return json as T;
+}
+
+/** "2 yumurta, 1 simit" → foods with grams (AI). */
+export function aiParseMeal(text: string) {
+  return postAi<{ items: { food: FoodHit; grams: number }[]; remaining: number }>(
+    "/api/ai/parse",
+    { text }
+  );
+}
+
+/** Food name → nutrition (AI, or free if someone already asked). */
+export function aiLookupFood(name: string) {
+  return postAi<{ food: FoodHit; cached: boolean; remaining?: number }>("/api/ai/food", { name });
+}
+
+/** AI requests left today. */
+export async function fetchAiRemaining(userId: string) {
+  const supabase = createClient();
+  const { data } = await supabase
+    .from("ai_usage")
+    .select("count")
+    .eq("user_id", userId)
+    .eq("day", istanbulToday())
+    .maybeSingle();
+  return Math.max(0, AI_DAILY_LIMIT - (data?.count ?? 0));
+}
 
 export async function fetchDay(userId: string, date: string) {
   const supabase = createClient();

@@ -1,5 +1,6 @@
 -- KaloriTakip — shared food seed (per 100 g, approximate values).
 -- Run after schema.sql. Safe to re-run (deletes and re-inserts seed rows).
+-- Folded Turkish names must be unique among shared rows.
 
 delete from public.foods where source = 'seed';
 
@@ -104,4 +105,6 @@ values
   ('Tuna (canned, in water)', 'Ton balığı (suda)', 116, 26, 0, 1, 80, '1/2 can', 'yarım kutu', 'seed'),
   ('Lean ground beef (cooked)', 'Yağsız kıyma (pişmiş)', 215, 26, 0, 12, 100, '1 portion', '1 porsiyon', 'seed'),
   ('Lentils (cooked)', 'Mercimek (haşlanmış)', 116, 9, 20, 0.4, 150, '1 portion', '1 porsiyon', 'seed'),
-  ('Whey protein powder', 'Whey protein tozu', 380, 75, 8, 5, 30, '1 scoop', '1 ölçek', 'seed');
+  ('Whey protein powder', 'Whey protein tozu', 380, 75, 8, 5, 30, '1 scoop', '1 ölçek', 'seed')
+-- skip names that already exist in the shared list (e.g. added by AI)
+on conflict (public.fold(name_tr)) where owner is null do nothing;

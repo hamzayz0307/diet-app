@@ -54,25 +54,61 @@ export function offToHit(p: OffProduct): FoodHit | null {
 const FIELDS =
   "code,product_name,product_name_tr,product_name_en,brands,serving_quantity,nutriments";
 
+/** Drops products with missing or impossible nutrition values. */
+export function plausible(h: FoodHit): boolean {
+  if (h.kcal_100 <= 0 || h.kcal_100 > 900) return false;
+  if (h.protein_100 < 0 || h.carbs_100 < 0 || h.fat_100 < 0) return false;
+  if (h.protein_100 + h.carbs_100 + h.fat_100 > 105) return false;
+  if (h.name_tr.length < 2 || h.name_tr.length > 80) return false;
+  return true;
+}
+
+const fold = (s: string) =>
+  s
+    .replace(/[Çç]/g, "c")
+    .replace(/[Ğğ]/g, "g")
+    .replace(/[İIı]/g, "i")
+    .replace(/[Öö]/g, "o")
+    .replace(/[Şş]/g, "s")
+    .replace(/[Üü]/g, "u")
+    .toLowerCase()
+    .trim();
+
+/** Packaged products sold in Turkey, most-scanned first. */
 export async function searchOff(q: string, lang: "en" | "tr"): Promise<FoodHit[]> {
   const url = new URL("https://world.openfoodfacts.org/cgi/search.pl");
   url.searchParams.set("search_terms", q);
   url.searchParams.set("search_simple", "1");
   url.searchParams.set("action", "process");
   url.searchParams.set("json", "1");
-  url.searchParams.set("page_size", "12");
+  url.searchParams.set("page_size", "24");
   url.searchParams.set("lc", lang);
+  url.searchParams.set("tagtype_0", "countries");
+  url.searchParams.set("tag_contains_0", "contains");
+  url.searchParams.set("tag_0", "turkey");
+  url.searchParams.set("sort_by", "unique_scans_n");
   url.searchParams.set("fields", FIELDS);
 
   const res = await fetch(url, {
     headers: { "User-Agent": UA },
     next: { revalidate: 3600 },
+    signal: AbortSignal.timeout(8000),
   });
   if (!res.ok) return [];
   const json = (await res.json()) as { products?: OffProduct[] };
-  return (json.products ?? [])
-    .map(offToHit)
-    .filter((h): h is FoodHit => h !== null);
+
+  const seen = new Set<string>();
+  const out: FoodHit[] = [];
+  for (const p of json.products ?? []) {
+    const h = offToHit(p);
+    if (!h || !plausible(h)) continue;
+    const key = `${fold(h.name_tr)}|${fold(h.brand ?? "")}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(h);
+    if (out.length >= 12) break;
+  }
+  return out;
 }
 
 export async function lookupBarcode(code: string): Promise<FoodHit | null> {

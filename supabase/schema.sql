@@ -68,13 +68,35 @@ create table if not exists public.foods (
   serving_g numeric,
   serving_label_en text,
   serving_label_tr text,
-  source text not null default 'custom' check (source in ('seed', 'custom', 'off')),
+  source text not null default 'custom',
   created_at timestamptz not null default now()
 );
 
-create index if not exists foods_name_en_idx on public.foods (lower(name_en));
-create index if not exists foods_name_tr_idx on public.foods (lower(name_tr));
+-- sources: seed = our list, custom = user's own, off = Open Food Facts, ai = estimated by AI
+alter table public.foods drop constraint if exists foods_source_check;
+alter table public.foods add constraint foods_source_check
+  check (source in ('seed', 'custom', 'off', 'ai'));
+
+-- Turkish-aware search key: lower-case, ç→c ğ→g ı/İ→i ö→o ş→s ü→u
+create or replace function public.fold(t text)
+returns text
+language sql immutable parallel safe
+as $$
+  select lower(translate(coalesce(t, ''),
+    'ÇĞİIÖŞÜÂÎÛçğıöşüâîû',
+    'CGIIOSUAIUcgiosuaiu'))
+$$;
+
+alter table public.foods add column if not exists search_key text
+  generated always as (
+    public.fold(name_tr) || ' ' || public.fold(name_en) || ' ' || public.fold(brand)
+  ) stored;
+
 create index if not exists foods_barcode_idx on public.foods (barcode);
+
+-- one shared row per food name (keeps AI-added foods from duplicating)
+create unique index if not exists foods_shared_name_uniq
+  on public.foods (public.fold(name_tr)) where owner is null;
 
 alter table public.foods enable row level security;
 
@@ -93,6 +115,58 @@ create policy "foods: update own" on public.foods
 drop policy if exists "foods: delete own" on public.foods;
 create policy "foods: delete own" on public.foods
   for delete using (owner = auth.uid());
+
+-- Ranked food search, called from the app.
+-- Order: exact name → first word is the query ("Süt (tam yağlı)") → whole word
+-- elsewhere ("Beyaz peynir") → name starts with it ("Sütlaç") → a word starts
+-- with it → contains; then the user's own
+-- foods, our list, AI-added, packaged; then shorter names.
+-- Also matches Turkish consonant softening: ekmek → ekmeği, kebap → kebabı.
+create or replace function public.search_foods(q text, max_results int default 30)
+returns setof public.foods
+language sql stable
+set search_path = public
+as $$
+  with t as (
+    select k,
+      case when length(k) >= 4 and right(k, 1) in ('k', 'p', 't')
+        then left(k, -1) || translate(right(k, 1), 'kpt', 'gbd')
+        else k end as k2
+    from (select replace(replace(public.fold(trim(q)), '%', ''), '_', '') as k) s
+  )
+  select f.*
+  from public.foods f
+  cross join t
+  cross join lateral (
+    select public.fold(f.name_tr) as ntr, public.fold(f.name_en) as nen
+  ) n
+  where length(t.k) >= 2
+    and (f.owner is null or f.owner = auth.uid())
+    and (f.search_key like '%' || t.k || '%' or f.search_key like '%' || t.k2 || '%')
+  order by
+    case
+      when n.ntr = t.k or n.nen = t.k then 0
+      when n.ntr like t.k || ' %' or n.ntr like t.k || ' (%'
+        or n.nen like t.k || ' %' or n.nen like t.k || ' (%' then 1
+      when n.ntr like '% ' || t.k or n.ntr like '% ' || t.k || ' %' or n.ntr like '% ' || t.k || ' (%'
+        or n.nen like '% ' || t.k or n.nen like '% ' || t.k || ' %' or n.nen like '% ' || t.k || ' (%' then 2
+      when n.ntr like t.k || '%' or n.nen like t.k || '%' then 3
+      when f.search_key like '% ' || t.k || '%' or f.search_key like '%(' || t.k || '%'
+        or f.search_key like '% ' || t.k2 || '%' then 4
+      else 5
+    end,
+    case
+      when f.owner = auth.uid() and f.source <> 'off' then 0
+      when f.source = 'seed' then 1
+      when f.source = 'ai' then 2
+      when f.owner = auth.uid() then 3
+      else 4
+    end,
+    length(f.name_tr)
+  limit greatest(1, least(max_results, 50));
+$$;
+
+grant execute on function public.search_foods(text, int) to authenticated;
 
 -- ---------------------------------------------------------------
 -- diary_entries (nutrition is copied in at log time)
@@ -153,6 +227,72 @@ alter table public.water_logs enable row level security;
 drop policy if exists "water: own rows" on public.water_logs;
 create policy "water: own rows" on public.water_logs
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- ---------------------------------------------------------------
+-- ai_usage (daily AI request counter; written only by the server)
+-- ---------------------------------------------------------------
+create table if not exists public.ai_usage (
+  user_id uuid not null references auth.users (id) on delete cascade,
+  day date not null,
+  count int not null default 0,
+  primary key (user_id, day)
+);
+
+alter table public.ai_usage enable row level security;
+
+drop policy if exists "ai_usage: read own" on public.ai_usage;
+create policy "ai_usage: read own" on public.ai_usage
+  for select using (auth.uid() = user_id);
+
+-- Takes one AI credit for today (Istanbul time). Returns credits left, or -1 if
+-- the daily limit is reached. Only the server (secret key) may call these.
+create or replace function public.use_ai_credit(uid uuid, daily_limit int)
+returns int
+language plpgsql
+security definer set search_path = public
+as $$
+declare
+  used int;
+begin
+  insert into public.ai_usage (user_id, day, count)
+  values (uid, (now() at time zone 'Europe/Istanbul')::date, 1)
+  on conflict (user_id, day) do update
+    set count = public.ai_usage.count + 1
+    where public.ai_usage.count < daily_limit
+  returning count into used;
+
+  if used is null then
+    return -1;
+  end if;
+  return daily_limit - used;
+end;
+$$;
+
+-- Gives a credit back when the AI call itself failed.
+create or replace function public.refund_ai_credit(uid uuid)
+returns void
+language sql
+security definer set search_path = public
+as $$
+  update public.ai_usage set count = greatest(0, count - 1)
+  where user_id = uid and day = (now() at time zone 'Europe/Istanbul')::date;
+$$;
+
+revoke all on function public.use_ai_credit(uuid, int) from public, anon, authenticated;
+revoke all on function public.refund_ai_credit(uuid) from public, anon, authenticated;
+grant execute on function public.use_ai_credit(uuid, int) to service_role;
+grant execute on function public.refund_ai_credit(uuid) to service_role;
+
+-- Finds a shared food by Turkish name, ignoring case and ç/ş/ı… differences.
+create or replace function public.find_shared_food(name text)
+returns setof public.foods
+language sql stable
+set search_path = public
+as $$
+  select * from public.foods
+  where owner is null and public.fold(name_tr) = public.fold(name)
+  limit 1;
+$$;
 
 -- ---------------------------------------------------------------
 -- account deletion (called from the app; deletes the auth user,
